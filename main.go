@@ -101,7 +101,7 @@ func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) handleGetChirpByID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	//fmt.Println(r.PathValue())
+
 	id, err := uuid.Parse(r.PathValue("chirpID"))
 	if err != nil {
 		errorResponce(400, "Bad ID", w)
@@ -208,8 +208,6 @@ func handleValidateChirp(w http.ResponseWriter, r *http.Request) {
 		errorResponce(400, "Chirp is too long", w)
 		return
 	}
-
-	// ============== Below eats extra white space.  Think it's ok for the tests but modifies output more then asked.
 
 	words := strings.Split(params.Body, " ")
 	filteredWords := make([]string, 0, len(words))
