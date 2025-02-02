@@ -104,9 +104,8 @@ func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 // POST /api/login
 func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Password           string `json:"password"`
-		Email              string `json:"email"`
-		Expires_in_seconds int    `json:"expires_in_seconds"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 	w.Header().Set("Content-Type", "application/json")
 
@@ -125,9 +124,6 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		errorResponce(400, "Must send a pasword", w)
 		return
 	}
-	if params.Expires_in_seconds == 0 || params.Expires_in_seconds > 3600 {
-		params.Expires_in_seconds = 3600
-	}
 
 	usr, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
 	if err != nil {
@@ -138,21 +134,96 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		errorResponce(401, "Incorrect email or password", w)
 		return
 	}
-	token, err := auth.MakeJWT(usr.ID, cfg.secret, time.Second*time.Duration(params.Expires_in_seconds))
+	token, err := auth.MakeJWT(usr.ID, cfg.secret, time.Hour)
 	if err != nil {
 		errorResponce(500, "Something went wrong", w)
 		log.Printf("Error creating JWT: %s", err.Error())
 		return
 	}
+	refershToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("Error MakeRefreshToken: %s", err.Error())
+		errorResponce(500, "Something went wrong", w)
+		return
+	}
+	_, err = cfg.dbQueries.SetRefreshToken(r.Context(), database.SetRefreshTokenParams{
+		Token:  refershToken,
+		UserID: usr.ID,
+	})
+	if err != nil {
+		log.Printf("Error SetRefreshToken: %s", err.Error())
+		errorResponce(500, "Something went wrong", w)
+		return
+	}
 
 	jsonResponce(200,
 		User{
-			ID:        usr.ID,
-			CreatedAt: usr.CreatedAt,
-			UpdatedAt: usr.UpdatedAt,
-			Email:     usr.Email,
-			Token:     token,
+			ID:           usr.ID,
+			CreatedAt:    usr.CreatedAt,
+			UpdatedAt:    usr.UpdatedAt,
+			Email:        usr.Email,
+			Token:        token,
+			RefreshToken: refershToken,
 		}, w)
+}
+
+// POST /api/refresh
+func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	/*
+		type parameters struct {
+			Token string `json:"token"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		var params parameters
+		if err := decoder.Decode(&params); err != nil {
+			log.Printf("Error decoding parameters: %s", err)
+			errorResponce(500, "Something went wrong", w)
+			return
+		}
+		if len(params.Token) == 0 {
+			errorResponce(400, "Must send token", w)
+			return
+		}
+	*/
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error GetBearerToken: %s", err.Error())
+		errorResponce(500, "Something went wrong", w)
+		return
+	}
+	usr, err := cfg.dbQueries.GetUserFromRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		errorResponce(401, "Forbidden", w)
+		return
+	}
+	accessToken, err := auth.MakeJWT(usr.ID, cfg.secret, time.Hour)
+	if err != nil {
+		log.Printf("Error MakeJWT: %s", err.Error())
+		errorResponce(500, "Something went wrong", w)
+		return
+	}
+	jsonResponce(200,
+		struct {
+			Token string `json:"token"`
+		}{
+			Token: accessToken,
+		}, w,
+	)
+}
+
+// POST /api/revoke
+func (cfg *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		errorResponce(400, "Must have token in header", w)
+		return
+	}
+	if err := cfg.dbQueries.RevokeToken(r.Context(), refreshToken); err != nil {
+		errorResponce(400, "No token to revoke", w)
+		return
+	}
+	w.WriteHeader(204)
 }
 
 func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
@@ -361,6 +432,9 @@ func main() {
 	serverMux.HandleFunc("POST /api/users", apiCfg.handleUsers)
 	serverMux.HandleFunc("POST /api/chirps", apiCfg.handleChirps)
 	serverMux.HandleFunc("POST /api/login", apiCfg.handleLogin)
+	serverMux.HandleFunc("POST /api/refresh", apiCfg.handleRefresh)
+	serverMux.HandleFunc("POST /api/revoke", apiCfg.handleRevoke)
+
 	serverMux.HandleFunc("GET /api/chirps", apiCfg.handleGetChirps)
 	serverMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleGetChirpByID)
 
