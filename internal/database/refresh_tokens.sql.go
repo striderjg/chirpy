@@ -12,7 +12,7 @@ import (
 )
 
 const getUserFromRefreshToken = `-- name: GetUserFromRefreshToken :one
-SELECT users.id, users.created_at, users.updated_at, users.email, users.hashed_password FROM refresh_tokens
+SELECT users.id, users.created_at, users.updated_at, users.email, users.hashed_password, users.is_chirpy_red FROM refresh_tokens
 INNER JOIN users ON refresh_tokens.user_id = users.id
 WHERE refresh_tokens.token = $1 AND refresh_tokens.revoked_at IS NULL
 `
@@ -26,6 +26,7 @@ func (q *Queries) GetUserFromRefreshToken(ctx context.Context, token string) (Us
 		&i.UpdatedAt,
 		&i.Email,
 		&i.HashedPassword,
+		&i.IsChirpyRed,
 	)
 	return i, err
 }
