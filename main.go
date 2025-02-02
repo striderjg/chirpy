@@ -170,22 +170,6 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 // POST /api/refresh
 func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	/*
-		type parameters struct {
-			Token string `json:"token"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		var params parameters
-		if err := decoder.Decode(&params); err != nil {
-			log.Printf("Error decoding parameters: %s", err)
-			errorResponce(500, "Something went wrong", w)
-			return
-		}
-		if len(params.Token) == 0 {
-			errorResponce(400, "Must send token", w)
-			return
-		}
-	*/
 	refreshToken, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		log.Printf("Error GetBearerToken: %s", err.Error())
