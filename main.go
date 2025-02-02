@@ -9,10 +9,12 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/striderjg/chirpy/internal/auth"
 	"github.com/striderjg/chirpy/internal/database"
 )
 
@@ -20,6 +22,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	secret         string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -50,26 +53,44 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte{})
 }
 
+// POST /api/users
 func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
-	type paramaters struct {
-		Email string `json:"email"`
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 	w.Header().Set("Content-Type", "application/json")
 
 	decoder := json.NewDecoder(r.Body)
-	var params paramaters
+	var params parameters
 	if err := decoder.Decode(&params); err != nil {
-		log.Printf("Error decoding paramaters: %s", err)
+		log.Printf("Error decoding parameters: %s", err)
 		errorResponce(500, "Something went wrong", w)
 		return
 	}
 
 	if len(params.Email) == 0 {
 		errorResponce(400, "Must send an email address", w)
+		return
 	}
-	usr, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	if len(params.Password) == 0 {
+		errorResponce(400, "User Must have Password", w)
+		return
+	}
+
+	hashedPwd, err := auth.HashPassword(params.Password)
+	if err != nil {
+		errorResponce(500, "Error hashing password", w)
+		return
+	}
+
+	usr, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPwd,
+	})
 	if err != nil {
 		errorResponce(400, "Unable to create user", w)
+		return
 	}
 	retUser := User{
 		ID:        usr.ID,
@@ -78,6 +99,60 @@ func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 		Email:     usr.Email,
 	}
 	jsonResponce(201, retUser, w)
+}
+
+// POST /api/login
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password           string `json:"password"`
+		Email              string `json:"email"`
+		Expires_in_seconds int    `json:"expires_in_seconds"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	decoder := json.NewDecoder(r.Body)
+	var params parameters
+	if err := decoder.Decode(&params); err != nil {
+		log.Printf("Error decoding parameters: %s", err)
+		errorResponce(500, "Something went wrong", w)
+		return
+	}
+	if len(params.Email) == 0 {
+		errorResponce(400, "Must send an email", w)
+		return
+	}
+	if len(params.Password) == 0 {
+		errorResponce(400, "Must send a pasword", w)
+		return
+	}
+	if params.Expires_in_seconds == 0 || params.Expires_in_seconds > 3600 {
+		params.Expires_in_seconds = 3600
+	}
+
+	usr, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		errorResponce(401, "Incorrect email or password", w)
+		return
+	}
+	if err := auth.CheckPasswordHash(params.Password, usr.HashedPassword); err != nil {
+		errorResponce(401, "Incorrect email or password", w)
+		return
+	}
+	token, err := auth.MakeJWT(usr.ID, cfg.secret, time.Second*time.Duration(params.Expires_in_seconds))
+	if err != nil {
+		errorResponce(500, "Something went wrong", w)
+		log.Printf("Error creating JWT: %s", err.Error())
+		return
+	}
+
+	jsonResponce(200,
+		User{
+			ID:        usr.ID,
+			CreatedAt: usr.CreatedAt,
+			UpdatedAt: usr.UpdatedAt,
+			Email:     usr.Email,
+			Token:     token,
+		}, w)
 }
 
 func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
@@ -124,12 +199,23 @@ func (cfg *apiConfig) handleGetChirpByID(w http.ResponseWriter, r *http.Request)
 	)
 }
 
+// POST /api/chirps
 func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
-	type paramaters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
-	}
 	w.Header().Set("Content-Type", "application/json")
+	type paramaters struct {
+		Body string `json:"body"`
+	}
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error GetBearerToken: %s", err.Error())
+		errorResponce(500, "Something went wrong", w)
+		return
+	}
+	usrId, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		errorResponce(401, "Not Authorized", w)
+		return
+	}
 
 	decoder := json.NewDecoder(r.Body)
 	var params paramaters
@@ -143,17 +229,11 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 		errorResponce(400, "No Chirp Recieved", w)
 		return
 	}
-	if len(params.UserID) == 0 {
-		errorResponce(400, "No User", w)
-		return
-	}
 
 	if len(params.Body) > 140 {
 		errorResponce(400, "Chirp is too long", w)
 		return
 	}
-
-	// ============== Below eats extra white space.  Think it's ok for the tests but modifies output more then asked.
 
 	words := strings.Split(params.Body, " ")
 	filteredWords := make([]string, 0, len(words))
@@ -167,7 +247,7 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
-		UserID: params.UserID,
+		UserID: usrId,
 		Body:   strings.Join(filteredWords, " "),
 	})
 	if err != nil {
@@ -262,9 +342,11 @@ func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	apiCfg.platform = os.Getenv("PLATFORM")
+	apiCfg.secret = os.Getenv("SECRET")
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		fmt.Printf("error opening db: %w\n", err)
+		fmt.Printf("error opening db: %s\n", err.Error())
 		os.Exit(1)
 	}
 	apiCfg.dbQueries = database.New(db)
@@ -278,6 +360,7 @@ func main() {
 	serverMux.HandleFunc("POST /api/validate_chirp", handleValidateChirp)
 	serverMux.HandleFunc("POST /api/users", apiCfg.handleUsers)
 	serverMux.HandleFunc("POST /api/chirps", apiCfg.handleChirps)
+	serverMux.HandleFunc("POST /api/login", apiCfg.handleLogin)
 	serverMux.HandleFunc("GET /api/chirps", apiCfg.handleGetChirps)
 	serverMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handleGetChirpByID)
 
